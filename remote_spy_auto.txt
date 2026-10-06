@@ -1,0 +1,265 @@
+-- ==============================================================================
+-- Remote Spy (Auto Copy) — ดักรีโมทที่เกมส่งไปเซิร์ฟเวอร์ แล้วคัดลอกลงคลิปบอร์ดให้เอง
+-- อ่านอย่างเดียว ไม่ยิงอะไรเอง ไม่แก้ค่าที่ส่ง
+-- วิธีใช้: รัน -> กด "ล้าง" -> ทำสิ่งที่อยากดู (เช่น กดสกิล) -> รอ 2 วิ -> วางในแชทได้เลย
+-- ==============================================================================
+
+-- ===== ตั้งค่า =====
+local COPY_DELAY = 1.5      -- หลังจับได้ครั้งล่าสุด รอกี่วินาทีแล้วค่อยคัดลอก (กันคัดลอกถี่)
+local MAX_COPY_LINES = 120  -- คัดลอกเฉพาะบรรทัดล่าสุดเท่านี้ (กันยาวเกินวางในแชท)
+local IGNORE = {            -- ชื่อรีโมทที่ไม่อยากเห็น (ใส่เพิ่มได้ เช่น ["rf_CRATE_TIMERS"] = true)
+}
+-- ==================
+
+local G = (getgenv and getgenv()) or _G
+local UserInputService = game:GetService("UserInputService")
+local LocalPlayer = game:GetService("Players").LocalPlayer
+
+-- สถานะเก็บใน getgenv: รันซ้ำแล้วใช้ hook ตัวเดิม ไม่ hook ซ้อน (hook ซ้อนทำให้บันทึกซ้ำ 2 เท่า)
+local S = G.RemoteSpyAuto
+if not S then
+    S = { hooked = false }
+    G.RemoteSpyAuto = S
+end
+S.lines, S.t0, S.paused, S.token = {}, os.clock(), false, (S.token or 0) + 1
+S.ignore = IGNORE
+if S.ui then pcall(function() S.ui:Destroy() end) S.ui = nil end
+
+-- ---------- แปลงค่าที่ส่งเป็นข้อความอ่านง่าย ----------
+local function num(n)
+    if n == math.floor(n) then return tostring(n) end
+    return string.format("%.3f", n)
+end
+local function fmt(v, depth, seen)
+    depth, seen = depth or 0, seen or {}
+    local t = typeof(v)
+    if t == "string" then return string.format("%q", v)
+    elseif t == "number" then return num(v)
+    elseif t == "Vector3" then return string.format("Vector3.new(%s, %s, %s)", num(v.X), num(v.Y), num(v.Z))
+    elseif t == "Vector2" then return string.format("Vector2.new(%s, %s)", num(v.X), num(v.Y))
+    elseif t == "CFrame" then
+        local c = { v:GetComponents() }
+        for i = 1, #c do c[i] = num(c[i]) end
+        return "CFrame.new(" .. table.concat(c, ", ") .. ")"
+    elseif t == "Instance" then return v:GetFullName()
+    elseif t == "table" then
+        if seen[v] or depth >= 3 then return "{...}" end
+        seen[v] = true
+        local parts, n = {}, 0
+        for k, x in pairs(v) do
+            n += 1
+            if n > 25 then parts[#parts + 1] = "..." break end
+            local key = type(k) == "string" and k or ("[" .. tostring(k) .. "]")
+            parts[#parts + 1] = key .. " = " .. fmt(x, depth + 1, seen)
+        end
+        seen[v] = nil
+        return "{" .. table.concat(parts, ", ") .. "}"
+    end
+    return tostring(v)
+end
+
+-- ---------- คัดลอก ----------
+local function buildText()
+    local out = {
+        "-- Remote Spy (Auto Copy) | PlaceId " .. tostring(game.PlaceId) .. " | " .. os.date("%Y-%m-%d %H:%M:%S"),
+    }
+    local first = math.max(1, #S.lines - MAX_COPY_LINES + 1)
+    if first > 1 then out[#out + 1] = "-- (ตัดบรรทัดเก่าออก " .. (first - 1) .. " บรรทัด)" end
+    for i = first, #S.lines do
+        local e = S.lines[i]
+        out[#out + 1] = string.format("[%6.1f] %s%s", e.t, e.text, e.count > 1 and (" (x" .. e.count .. ")") or "")
+    end
+    return table.concat(out, "\n")
+end
+
+local statusLabel, previewLabel
+local copiedCount = 0
+local function copyNow()
+    if #S.lines == 0 then return false end
+    if not setclipboard then return false end
+    local ok = pcall(setclipboard, buildText())
+    if ok then copiedCount = #S.lines end
+    return ok
+end
+
+local pendingCopy = 0
+local function scheduleCopy()
+    pendingCopy += 1
+    local mine, tok = pendingCopy, S.token
+    task.delay(COPY_DELAY, function()
+        if mine == pendingCopy and tok == S.token then copyNow() end
+    end)
+end
+
+local function refreshUI()
+    if not statusLabel then return end
+    local total = 0
+    for _, e in ipairs(S.lines) do total += e.count end
+    statusLabel.Text = string.format("%s | จับได้ %d ครั้ง (%d บรรทัด) | %s",
+        S.paused and "หยุดอยู่" or "กำลังดัก",
+        total, #S.lines,
+        not setclipboard and "executor ไม่มี setclipboard"
+            or (#S.lines == 0 and "ยังไม่มีข้อมูล")
+            or (copiedCount == #S.lines and "คัดลอกแล้ว วางได้เลย" or "รอคัดลอก..."))
+    local tail = {}
+    for i = math.max(1, #S.lines - 3), #S.lines do
+        local e = S.lines[i]
+        local s = e.text:gsub("^.-([^%.]+:[A-Za-z]+%()", "%1")   -- ตัดเส้นทางยาวออก เหลือชื่อรีโมท:เมธอด(
+        tail[#tail + 1] = (#s > 60 and (s:sub(1, 60) .. "…") or s) .. (e.count > 1 and (" x" .. e.count) or "")
+    end
+    previewLabel.Text = #tail > 0 and table.concat(tail, "\n") or "กดสกิล/ทำสิ่งที่อยากดู แล้วรอสักครู่"
+end
+
+-- ---------- บันทึกหนึ่งครั้ง (ถูกเรียกจาก hook) ----------
+local function record(remote, method, args)
+    if S.paused then return end
+    if S.ignore and S.ignore[remote.Name] then return end
+    local parts = {}
+    for i = 1, args.n do parts[i] = fmt(args[i]) end
+    local text = remote:GetFullName() .. ":" .. method .. "(" .. table.concat(parts, ", ") .. ")"
+    local last = S.lines[#S.lines]
+    if last and last.text == text then
+        last.count += 1   -- เรียกซ้ำแบบเดิมติดกัน รวมเป็นบรรทัดเดียว (xN)
+    else
+        S.lines[#S.lines + 1] = { t = os.clock() - S.t0, text = text, count = 1 }
+    end
+    scheduleCopy()
+    refreshUI()
+end
+S.record = record   -- hook เรียกผ่านตัวนี้เสมอ (รันซ้ำแล้วใช้ฟังก์ชันใหม่ได้โดยไม่ต้อง hook ใหม่)
+
+-- ---------- hook (ครั้งเดียวต่อเซสชันเกม) ----------
+local hookError = nil
+if not S.hooked then
+    if type(hookmetamethod) ~= "function" or type(getnamecallmethod) ~= "function" then
+        hookError = "executor นี้ไม่มี hookmetamethod/getnamecallmethod ดักรีโมทไม่ได้"
+    else
+        local ok, err = pcall(function()
+            local wrap = newcclosure or function(f) return f end
+            local old
+            old = hookmetamethod(game, "__namecall", wrap(function(self, ...)
+                local method = getnamecallmethod()
+                if (method == "FireServer" or method == "InvokeServer")
+                    and typeof(self) == "Instance"
+                    and (self:IsA("RemoteEvent") or self:IsA("RemoteFunction") or self:IsA("UnreliableRemoteEvent"))
+                    and not (checkcaller and checkcaller()) then
+                    local rec = G.RemoteSpyAuto and G.RemoteSpyAuto.record
+                    if rec then pcall(rec, self, method, table.pack(...)) end
+                end
+                return old(self, ...)
+            end))
+        end)
+        if ok then S.hooked = true else hookError = "ติดตั้ง hook ไม่สำเร็จ: " .. tostring(err) end
+    end
+end
+
+-- ---------- UI เล็กๆ: สถานะ + 4 บรรทัดล่าสุด + ปุ่ม ล้าง / หยุด / คัดลอก ----------
+pcall(function()
+    local okHui, hui = pcall(function() return gethui and gethui() end)
+    local parent = (okHui and hui) or game:GetService("CoreGui")
+    local gui = Instance.new("ScreenGui")
+    gui.Name = "RemoteSpyAutoUI"
+    gui.ResetOnSpawn = false
+    gui.DisplayOrder = 999
+    gui.Parent = parent
+    S.ui = gui
+
+    local frame = Instance.new("Frame")
+    frame.Size = UDim2.fromOffset(300, 132)
+    frame.Position = UDim2.fromOffset(20, 60)
+    frame.BackgroundColor3 = Color3.fromRGB(15, 19, 26)
+    frame.BorderSizePixel = 0
+    frame.Active = true
+    frame.Parent = gui
+    local c = Instance.new("UICorner") c.CornerRadius = UDim.new(0, 8) c.Parent = frame
+
+    local title = Instance.new("TextButton")
+    title.Size = UDim2.new(1, -10, 0, 22)
+    title.Position = UDim2.fromOffset(8, 2)
+    title.BackgroundTransparency = 1
+    title.AutoButtonColor = false
+    title.Text = "📡 Remote Spy (Auto Copy)"
+    title.Font = Enum.Font.GothamBold
+    title.TextSize = 12
+    title.TextColor3 = Color3.fromRGB(240, 244, 250)
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    title.Parent = frame
+
+    do -- ลากที่หัวข้อ
+        local dragging, startPos, startInput = false, nil, nil
+        title.InputBegan:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+                dragging, startPos, startInput = true, frame.Position, input.Position
+                input.Changed:Connect(function()
+                    if input.UserInputState == Enum.UserInputState.End then dragging = false end
+                end)
+            end
+        end)
+        UserInputService.InputChanged:Connect(function(input)
+            if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+                local d = input.Position - startInput
+                frame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
+            end
+        end)
+    end
+
+    statusLabel = Instance.new("TextLabel")
+    statusLabel.Size = UDim2.new(1, -16, 0, 16)
+    statusLabel.Position = UDim2.fromOffset(8, 24)
+    statusLabel.BackgroundTransparency = 1
+    statusLabel.Font = Enum.Font.Gotham
+    statusLabel.TextSize = 11
+    statusLabel.TextColor3 = Color3.fromRGB(130, 200, 160)
+    statusLabel.TextXAlignment = Enum.TextXAlignment.Left
+    statusLabel.TextTruncate = Enum.TextTruncate.AtEnd
+    statusLabel.Parent = frame
+
+    previewLabel = Instance.new("TextLabel")
+    previewLabel.Size = UDim2.new(1, -16, 0, 56)
+    previewLabel.Position = UDim2.fromOffset(8, 42)
+    previewLabel.BackgroundTransparency = 1
+    previewLabel.Font = Enum.Font.Code
+    previewLabel.TextSize = 10
+    previewLabel.TextColor3 = Color3.fromRGB(150, 162, 184)
+    previewLabel.TextXAlignment = Enum.TextXAlignment.Left
+    previewLabel.TextYAlignment = Enum.TextYAlignment.Top
+    previewLabel.Parent = frame
+
+    local function button(text, x, w, onClick)
+        local b = Instance.new("TextButton")
+        b.Name = "Btn_" .. text
+        b.Size = UDim2.fromOffset(w, 24)
+        b.Position = UDim2.fromOffset(x, 102)
+        b.BackgroundColor3 = Color3.fromRGB(34, 44, 60)
+        b.Text = text
+        b.Font = Enum.Font.GothamBold
+        b.TextSize = 11
+        b.TextColor3 = Color3.fromRGB(240, 244, 250)
+        b.Parent = frame
+        local bc = Instance.new("UICorner") bc.CornerRadius = UDim.new(0, 6) bc.Parent = b
+        b.MouseButton1Click:Connect(function() onClick(b) end)
+        return b
+    end
+    button("ล้าง", 8, 88, function()
+        S.lines, S.t0, copiedCount = {}, os.clock(), 0
+        pendingCopy += 1   -- ยกเลิกงานคัดลอกที่ค้าง
+        refreshUI()
+    end)
+    button("หยุด", 104, 88, function(b)
+        S.paused = not S.paused
+        b.Text = S.paused and "ดักต่อ" or "หยุด"
+        refreshUI()
+    end)
+    button("คัดลอก", 200, 92, function()
+        copyNow()
+        refreshUI()
+    end)
+end)
+
+if hookError then
+    warn("[RemoteSpyAuto] " .. hookError)
+    if statusLabel then statusLabel.Text = hookError end
+else
+    refreshUI()
+    print("[RemoteSpyAuto] พร้อมแล้ว: ทำสิ่งที่อยากดู แล้วรอ " .. COPY_DELAY .. " วิ ผลจะอยู่ในคลิปบอร์ดเอง")
+end
