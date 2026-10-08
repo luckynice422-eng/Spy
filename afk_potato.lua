@@ -5,13 +5,18 @@
 -- ===== ตั้งค่า Anti-AFK (ปรับในโค้ดได้) =====
 local AFK_MIN, AFK_MAX = 45, 75   -- ส่ง input จำลองทุก 45–75 วินาที (สุ่มช่วงให้ไม่เป๊ะเหมือนเครื่อง)
 -- ===== ตั้งค่า Auto Ultimate =====
--- โหมดหลัก: กดปุ่มอัลติบนจอทันทีที่ปุ่ม "ขึ้นและกดได้" (ไม่ต้องรู้ว่าเป็นยูนิตไหน ไม่ต้องหา hitbox)
+-- วิธีสั่งอัลติ:
+--   "remote" (ค่าเริ่มต้น) = ยิงรีโมทที่ดักได้จริงจากเกม: ReplicatedStorage.GameEvents.UseUltimateEvent:FireServer(<ยูนิตของเรา>)
+--                            ยิงให้ทุกยูนิตของเราที่วางในด่าน ทุก ULT_INTERVAL วินาที (อัลติยังไม่พร้อม เกมจะไม่รับเอง)
+--   "button" = กดปุ่มอัลติบนจอ + ปุ่มที่สอนไว้ (ถ้าไม่เจอปุ่มเลย และ ULT_REMOTE_FALLBACK = true จะยิงรีโมทแทน)
+--   "both"   = ทำทั้งสองอย่าง (ยิงรีโมท + กดปุ่มบนจอ/ปุ่มที่สอนไว้)
+local ULT_MODE = "remote"
 local ULT_UI_INTERVAL = 0.3            -- เช็ก/กดทุกกี่วินาทีในโหมดปุ่มบนจอ (ต่ำสุด 0.2)
 local ULT_PRESS_WHILE_COOLDOWN = true  -- true = กดซ้ำเรื่อยๆ แม้ปุ่มดูเหมือนยังคูลดาวน์ (ซ่อน / Interactable=false / ขนาด 0) เกมจะไม่รับเองถ้ายังไม่พร้อม พอคูลดาวน์เสร็จก็ออกสกิลทันที
                                        -- false = กดเฉพาะตอนปุ่ม "พร้อม" (เสี่ยง: ถ้าเกมไม่คืนสถานะปุ่มหลังคูลดาวน์ จะกดครั้งเดียวแล้วหยุด)
 local ULT_METHOD = "auto"              -- วิธีกด: "auto" (สัญญาณปุ่มก่อน ไม่ได้ค่อยคลิกจริง) | "signal" | "click"
 local ULT_EXTRA_NAMES = {}             -- ชื่อปุ่มที่อยากให้กดเพิ่ม (ชื่อตรงตัว) เช่น {"SkillButton1"} ดูชื่อได้จาก AfkPotato.ListButtons()
--- สำรอง: ถ้าไม่พบปุ่มอัลติบนจอเลย ใช้รีโมท UseUltimateEvent ยิงให้ยูนิตของเรา
+-- โหมด "button": ถ้าไม่พบปุ่มอัลติบนจอเลย ใช้รีโมท UseUltimateEvent ยิงให้ยูนิตของเราแทน
 local ULT_REMOTE_FALLBACK = true
 -- สอนปุ่ม: กดปุ่ม "สอนปุ่ม" ในกล่อง แล้วแตะปุ่มสกิลในเกมจริง 1 ครั้ง (แตะได้หลายปุ่ม) สคริปต์จะจดไว้แล้วกดให้เองทุกครั้งที่ปุ่มนั้นกดได้
 local TEACH_SECONDS = 30            -- โหมดสอนเปิดกี่วินาทีแล้วปิดเอง
@@ -19,7 +24,7 @@ local TEACH_SECONDS = 30            -- โหมดสอนเปิดกี�
 local RETRY_COOLDOWN = 5               -- เว้นกี่วินาทีระหว่างการสั่งเล่นซ้ำแต่ละครั้ง (กันยิงรัว)
 local RETRY_MAX = 0                    -- เล่นซ้ำสูงสุดกี่รอบแล้วหยุด (0 = ไม่จำกัด) เผื่อเกมกินตั๋ว/เงินทุกครั้งที่เล่นซ้ำ
 local RETRY_EXTRA_NAMES = {}           -- ชื่อปุ่ม "เล่นซ้ำ" เพิ่มเอง (ตรงตัว) กรณีเกมใช้ชื่ออื่น ดูชื่อจาก AfkPotato.ListButtons()
-local ULT_INTERVAL = 1                 -- ความถี่ของโหมดรีโมทสำรอง (ต่ำสุด 0.5)
+local ULT_INTERVAL = 1                 -- ยิงรีโมทอัลติทุกกี่วินาที (ต่อยูนิต, ต่ำสุด 0.5)
 -- ===================================
 -- ===========================================
 -- ==============================================================================
@@ -218,6 +223,8 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local GuiService = game:GetService("GuiService")
 ULT_UI_INTERVAL = math.max(0.2, tonumber(ULT_UI_INTERVAL) or 0.3)
 ULT_INTERVAL = math.max(0.5, tonumber(ULT_INTERVAL) or 1)
+ULT_MODE = tostring(ULT_MODE or "remote"):lower()
+if ULT_MODE ~= "remote" and ULT_MODE ~= "button" and ULT_MODE ~= "both" then ULT_MODE = "remote" end
 local Ult = { fired = 0, status = "ปิดอยู่", remoteStatus = "-", how = "-", remote = nil, folder = nil, lastSearch = -math.huge, lastRemote = -math.huge }
 
 -- ---------- จับชื่อปุ่ม ----------
@@ -592,9 +599,22 @@ end
 -- ตื่นทุก ULT_UI_INTERVAL วินาทีเสมอ (ปุ่มโผล่ใหม่ถูกจับทันทีแล้ว ลูปต้องไม่หลับนานจนกดช้า)
 -- โหมดรีโมทสำรองถูกจำกัดให้ยิงไม่เกิน 1 รอบต่อ ULT_INTERVAL วินาที ไม่ยิงถี่ตามลูป
 -- ultStep คืนค่า "รอกี่วินาที" ; ลูปครอบด้วย pcall กันข้อผิดพลาดชั่วคราวทำให้ลูปตายแล้วหยุดกดถาวร
+local function remoteDue()
+    -- ยิงรีโมทไม่เกิน 1 รอบต่อ ULT_INTERVAL วินาที (ลูปตื่นทุก ULT_UI_INTERVAL แต่รีโมทไม่ยิงถี่ตามลูป)
+    if os.clock() - Ult.lastRemote >= ULT_INTERVAL - 0.001 then
+        Ult.lastRemote = os.clock()
+        remoteRound()
+    end
+end
 local function ultStep()
     local roundStart = os.clock()
     local nextWait = ULT_UI_INTERVAL
+    if App.autoUlt and ULT_MODE == "remote" then
+        remoteDue()
+        Ult.status = "โหมดรีโมท: " .. Ult.remoteStatus
+        return math.min(ULT_UI_INTERVAL, math.max(0.05, ULT_INTERVAL - (os.clock() - Ult.lastRemote)))
+    end
+    if App.autoUlt and ULT_MODE == "both" then remoteDue() end
     if App.autoUlt then
         ultScan()
         local known, shown, all = ultButtons()
@@ -618,6 +638,7 @@ local function ultStep()
                 end
                 if pressed > 0 then
                     Ult.status = string.format("โหมดปุ่มบนจอ: กด %d ปุ่ม (%s) | พร้อม %d ซ่อน/คูลดาวน์ %d", pressed, Ult.how, #shown, known - #shown)
+                        .. (ULT_MODE == "both" and (" | รีโมท: " .. Ult.remoteStatus) or "")
                 elseif #shown == 0 then
                     Ult.status = string.format("โหมดปุ่มบนจอ: ปุ่มซ่อน/คูลดาวน์ทั้งหมด (%d) และไม่มีสัญญาณให้กดตรงๆ รอปุ่มขึ้น", known)
                 else
@@ -625,11 +646,14 @@ local function ultStep()
                 end
             end
             nextWait = math.max(0.05, ULT_UI_INTERVAL - (os.clock() - roundStart))
-        elseif ULT_REMOTE_FALLBACK then
-            if os.clock() - Ult.lastRemote >= ULT_INTERVAL - 0.001 then
-                Ult.lastRemote = os.clock()
-                remoteRound()
+            if ULT_MODE == "both" then   -- ตื่นให้ตรงรอบยิงรีโมทด้วย (ไม่งั้นรอบรีโมทเพี้ยนเป็น 1.2 วิ ตามจังหวะ 0.3 วิของลูป)
+                nextWait = math.min(nextWait, math.max(0.05, ULT_INTERVAL - (os.clock() - Ult.lastRemote)))
             end
+        elseif ULT_MODE == "both" then
+            Ult.status = "รีโมท: " .. Ult.remoteStatus .. " | ไม่พบปุ่มอัลติบนจอ"
+            nextWait = math.min(ULT_UI_INTERVAL, math.max(0.05, ULT_INTERVAL - (os.clock() - Ult.lastRemote)))
+        elseif ULT_REMOTE_FALLBACK then
+            remoteDue()
             Ult.status = "โหมดรีโมท (ไม่พบปุ่มอัลติบนจอ): " .. Ult.remoteStatus
             nextWait = math.min(ULT_UI_INTERVAL, math.max(0.05, ULT_INTERVAL - (os.clock() - Ult.lastRemote)))
         else
@@ -788,6 +812,27 @@ local function ultDebug()
     out[#out + 1] = string.format("ตั้งค่า: ULT_PRESS_WHILE_COOLDOWN=%s ULT_METHOD=%s ULT_UI_INTERVAL=%s | getconnections=%s firesignal=%s คลิกจำลอง=%s | สถานะ: %s",
         tostring(ULT_PRESS_WHILE_COOLDOWN), tostring(ULT_METHOD), tostring(ULT_UI_INTERVAL),
         tostring(type(getconnections) == "function"), tostring(type(firesignal) == "function"), tostring(VirtualInputManager ~= nil), tostring(Ult.status))
+    -- ข้อมูลรีโมท (ใช้ในโหมด remote/both และเป็นทางสำรองของ button)
+    local okR, r = pcall(ultRemote)
+    out[#out + 1] = string.format("โหมด: %s | รีโมท: %s | ยิงทุก %s วิ | สถานะรีโมทล่าสุด: %s", ULT_MODE,
+        (okR and r) and (r:GetFullName() .. " [" .. r.ClassName .. "]") or "ไม่พบ (อยู่ล็อบบี้/คนละเกม?)", tostring(ULT_INTERVAL), tostring(Ult.remoteStatus))
+    local okF, folder = pcall(ultFolder)
+    if okF and folder then
+        local okU, units, why = pcall(ultUnits, folder)
+        if okU and #units > 0 then
+            local names = {}
+            for i, u in ipairs(units) do
+                if i > 10 then names[#names + 1] = "…" break end
+                local okN, n = pcall(function() return tostring(u:GetAttribute("DisplayName") or u:GetAttribute("UnitId") or "?") end)
+                names[#names + 1] = okN and n or "?"
+            end
+            out[#out + 1] = string.format("ยูนิตของเราที่จะยิงอัลติให้ (%d): %s | โฟลเดอร์: %s", #units, table.concat(names, ", "), folder:GetFullName())
+        else
+            out[#out + 1] = "ยูนิตของเรา: " .. tostring(okU and why or "อ่านไม่ได้") .. " | โฟลเดอร์: " .. folder:GetFullName()
+        end
+    else
+        out[#out + 1] = "ยูนิตของเรา: หา PlayerFolder ไม่เจอ (ยังไม่เข้าด่าน?)"
+    end
     local shownSet = {}
     for _, b in ipairs(shown) do shownSet[b] = true end
     for i, b in ipairs(all) do
@@ -1387,7 +1432,7 @@ if App.potato then
     end)
 end
 
-print(string.format("[AfkPotato] พร้อมแล้ว: Anti-AFK %s / Potato %s / 3D %s / ซ่อนคน %s / อัลติ %s / ล็อก FPS %s | Config: %s",
+print(string.format("[AfkPotato] พร้อมแล้ว: Anti-AFK %s / Potato %s / 3D %s / ซ่อนคน %s / อัลติ %s (โหมด " .. ULT_MODE .. ") / ล็อก FPS %s | Config: %s",
     App.antiAfk and "เปิด" or "ปิด", App.potato and "เปิด (รอเกมโหลดแล้วปรับ)" or "ปิด",
     App.render3dOff and "ปิดภาพ" or "ปกติ", App.hidePlayers and "เปิด" or "ปิด", App.autoUlt and "เปิด" or "ปิด",
     hasFpsCap and fpsLabel(App.fpsCap) or "ไม่รองรับ", Config.status))
